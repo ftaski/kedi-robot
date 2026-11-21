@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Kedi Robotu</title>
+<style>
+:root {
+  --bg: #f6f4ef; --card: #ffffff; --text: #1d1b18; --muted: #6b665d; --line: #e2ddd3;
+  --accent: #d9622b; --accent-text: #ffffff; --ok: #2f8a4c; --stop: #b3261e;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #161513; --card: #22201d; --text: #f1ede6; --muted: #a39d92; --line: #36332e;
+          --accent: #f07a42; --ok: #4fb46c; --stop: #e5534b; }
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+body { margin: 0; background: var(--bg); color: var(--text);
+       font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+main { max-width: 480px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+h1 { font-size: 20px; margin: 4px 0 0; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+button { font: inherit; border: 0; border-radius: 10px; padding: 12px 16px; cursor: pointer;
+         background: var(--line); color: var(--text); }
+button.primary { background: var(--accent); color: var(--accent-text); }
+button.go { background: var(--ok); color: #fff; }
+button.halt { background: var(--stop); color: #fff; }
+button:disabled { opacity: .45; }
+.row { display: flex; gap: 10px; }
+.row > * { flex: 1; }
+#status { color: var(--muted); font-size: 14px; }
+.big { font-size: 44px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat { display: flex; justify-content: space-between; align-items: baseline; }
+.mode { font-size: 18px; font-weight: 600; }
+#pad { position: relative; width: min(260px, 80vw); aspect-ratio: 1; margin: 6px auto 0;
+       border-radius: 50%; background: var(--bg); border: 2px solid var(--line); touch-action: none; }
+#knob { position: absolute; width: 34%; height: 34%; left: 33%; top: 33%; border-radius: 50%;
+        background: var(--accent); pointer-events: none; transition: transform .12s; }
+#pad.active #knob { transition: none; }
+.hint { color: var(--muted); font-size: 13px; text-align: center; margin: 8px 0 0; }
+label { display: grid; gap: 4px; margin-bottom: 12px; font-size: 14px; }
+label span { display: flex; justify-content: space-between; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.disabled { opacity: .45; pointer-events: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Kedi Robotu</h1>
+
+  <div class="card">
+    <div class="row"><button id="connect" class="primary">Bağlan</button></div>
+    <p id="status">Bağlı değil.</p>
+  </div>
+
+  <div id="controls" class="disabled" style="display:grid; gap:14px">
+    <div class="card">
+      <div class="stat"><span class="big" id="dist">–</span><span class="mode" id="mode">–</span></div>
+      <div style="color:var(--muted); font-size:14px">önündeki mesafe (cm)</div>
+      <div class="row" style="margin-top:12px">
+        <button id="start" class="go">Oyunu başlat</button>
+        <button id="stop" class="halt">Durdur</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div id="pad"><div id="knob"></div></div>
+      <p class="hint">Sürmek için basılı tutup kaydır. Bırakınca robot bir saniye sonra kendi moduna döner.</p>
+    </div>
+
+    <div class="card">
+      <label><span>Hız sınırı <b id="v-speed"></b></span><input id="speed" type="range" min="100" max="255" step="5"></label>
+      <label><span>Kaçma mesafesi (cm) <b id="v-escape"></b></span><input id="escape" type="range" min="5" max="35"></label>
+      <label><span>Oyun süresi (dk) <b id="v-minutes"></b></span><input id="minutes" type="range" min="1" max="60"></label>
+      <button id="save" class="primary" style="width:100%">Ayarları gönder</button>
+      <p class="hint">Ayarlar robot kapanınca sıfırlanır.</p>
+    </div>
+  </div>
+</main>
+
+<script>
+// Makeblock BLE module exposes a UART-like service; the characteristics are found by their properties.
+const SERVICES = [0xffe1, 0xffe0];
+const MODES = { I: 'Bekliyor', W: 'Dolaşıyor', P: 'Oynuyor', M: 'Elle' };
+const $ = id => document.getElementById(id);
+let device, writeChar, rxBuf = '', settingsLoaded = false;
+
+// GATT allows one operation at a time: commands queue up, joystick frames only keep the latest.
+let busy = false, pendingDrive = null;
+const queue = [];
+async function pump() {
+  if (busy || !writeChar) return;
+  const line = queue.shift() ?? pendingDrive;
+  if (line === undefined || line === null) return;
+  if (line === pendingDrive) pendingDrive = null;
+  busy = true;
+  try {
+    const data = new TextEncoder().encode(line + '\n');
+    if (writeChar.properties.writeWithoutResponse) await writeChar.writeValueWithoutResponse(data);
+    else await writeChar.writeValue(data);
+  } catch (e) { $('status').textContent = 'Gönderme hatası: ' + e.message; }
+  busy = false;
+  pump();
+}
+const send = line => { queue.push(line); pump(); };
+const sendDrive = line => { pendingDrive = line; pump(); };
+
+function onData(e) {
+  rxBuf += new TextDecoder().decode(e.target.value);
+  let i;
+  while ((i = rxBuf.indexOf('\n')) >= 0) {
+    const line = rxBuf.slice(0, i).trim(); rxBuf = rxBuf.slice(i + 1);
+    const p = line.split(',');
+    if (p[0] !== 'D' || p.length < 6) continue;
+    $('dist').textContent = p[1] === '400' ? '—' : p[1];
+    $('mode').textContent = MODES[p[2]] || p[2];
+    if (!settingsLoaded) {
+      settingsLoaded = true;
+      $('speed').value = p[3]; $('escape').value = p[4]; $('minutes').value = p[5];
+      showSettings();
+    }
+  }
+}
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    $('status').textContent = 'Bu tarayıcı Bluetooth desteklemiyor. iPhone/iPad’de Bluefy uygulamasıyla, bilgisayarda Chrome ya da Edge ile aç.';
+    return;
+  }
+  try {
+    $('status').textContent = 'Robot aranıyor…';
+    device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
+    device.addEventListener('gattserverdisconnected', onDisconnect);
+    const server = await device.gatt.connect();
+    let chars = [];
+    for (const s of SERVICES) {
+      try { chars = chars.concat(await (await server.getPrimaryService(s)).getCharacteristics()); } catch {}
+    }
+    writeChar = chars.find(c => c.properties.writeWithoutResponse || c.properties.write);
+    const notifyChar = chars.find(c => c.properties.notify);
+    if (!writeChar || !notifyChar) throw new Error('Bu cihazda robotun seri servisi bulunamadı. Listeden Makeblock modülünü seç.');
+    notifyChar.addEventListener('characteristicvaluechanged', onData);
+    await notifyChar.startNotifications();
+    settingsLoaded = false;
+    $('status').textContent = 'Bağlı: ' + (device.name || 'robot');
+    $('controls').classList.remove('disabled');
+    $('connect').textContent = 'Bağlantıyı kes';
+  } catch (e) {
+    $('status').textContent = e.name === 'NotFoundError' ? 'Cihaz seçilmedi.' : 'Bağlanamadı: ' + e.message;
+  }
+}
+
+function onDisconnect() {
+  writeChar = null;
+  $('status').textContent = 'Bağlantı koptu.';
+  $('controls').classList.add('disabled');
+  $('connect').textContent = 'Bağlan';
+}
+
+$('connect').onclick = () => device?.gatt?.connected ? device.gatt.disconnect() : connect();
+$('start').onclick = () => send('S');
+$('stop').onclick = () => send('X');
+
+function showSettings() {
+  $('v-speed').textContent = $('speed').value;
+  $('v-escape').textContent = $('escape').value;
+  $('v-minutes').textContent = $('minutes').value;
+}
+['speed', 'escape', 'minutes'].forEach(id => $(id).oninput = showSettings);
+$('save').onclick = () => send(`C,${$('speed').value},${$('escape').value},${$('minutes').value}`);
+
+// Joystick: up = forward, sideways = turn (tank mix). Repeats every 100 ms so the robot's 1 s timeout never fires while held.
+const pad = $('pad'), knob = $('knob');
+let stick = null, timer = null;
+function stickFrame() {
+  if (!stick) return;
+  const l = Math.round(Math.max(-1, Math.min(1, stick.y + stick.x)) * 255);
+  const r = Math.round(Math.max(-1, Math.min(1, stick.y - stick.x)) * 255);
+  sendDrive(`M,${l},${r}`);
+}
+function moveStick(e) {
+  const b = pad.getBoundingClientRect(), rad = b.width / 2;
+  let dx = (e.clientX - b.left - rad) / rad, dy = (e.clientY - b.top - rad) / rad;
+  const len = Math.hypot(dx, dy);
+  if (len > 1) { dx /= len; dy /= len; }
+  stick = { x: dx, y: -dy };
+  knob.style.transform = `translate(${dx * rad * 0.66}px, ${dy * rad * 0.66}px)`;
+}
+pad.addEventListener('pointerdown', e => {
+  pad.setPointerCapture(e.pointerId); pad.classList.add('active');
+  moveStick(e); stickFrame(); timer = setInterval(stickFrame, 100);
+});
+pad.addEventListener('pointermove', e => { if (stick) moveStick(e); });
+function release() {
+  if (!stick) return;
+  stick = null; clearInterval(timer); pad.classList.remove('active');
+  knob.style.transform = ''; sendDrive('M,0,0');
+}
+pad.addEventListener('pointerup', release);
+pad.addEventListener('pointercancel', release);
+</script>
+</body>
+</html>
