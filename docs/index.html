@@ -79,7 +79,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 
 <script>
 // Makeblock BLE module exposes a UART-like service; the characteristics are found by their properties.
-const SERVICES = [0xffe1, 0xffe0];
+const SERVICES = ['0000ffe1-0000-1000-8000-00805f9b34fb', '0000ffe0-0000-1000-8000-00805f9b34fb'];
 const MODES = { I: 'Bekliyor', W: 'Dolaşıyor', P: 'Oynuyor', M: 'Elle' };
 const $ = id => document.getElementById(id);
 let device, writeChar, rxBuf = '', settingsLoaded = false;
@@ -130,8 +130,15 @@ async function connect() {
   let step = 'cihaz seçme';
   const say = s => { step = s; $('status').textContent = s + '…'; };
   try {
+    say('Bluetooth kontrol ediliyor');
+    if (navigator.bluetooth.getAvailability && !(await navigator.bluetooth.getAvailability()))
+      throw new Error('Bluetooth kapalı ya da Bluefy’nin Bluetooth izni yok (Ayarlar → Bluefy → Bluetooth).');
     say('Robot aranıyor');
-    device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
+    // Bluefy failed with error "2" on acceptAllDevices; search by module name / serial service instead.
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'Makeblock' }, { services: [SERVICES[0]] }, { services: [SERVICES[1]] }],
+      optionalServices: SERVICES,
+    });
     device.addEventListener('gattserverdisconnected', onDisconnect);
     say('Bağlanılıyor: ' + (device.name || 'adsız cihaz'));
     const server = await device.gatt.connect();
@@ -143,7 +150,7 @@ async function connect() {
         const cs = await svc.getCharacteristics();
         chars = chars.concat(cs);
         found.push(svc.uuid.slice(4, 8) + '[' + cs.map(c => c.uuid.slice(4, 8)).join(' ') + ']');
-      } catch (e) { found.push(s.toString(16) + ':yok'); }
+      } catch (e) { found.push(s.slice(4, 8) + ':yok'); }
     }
     writeChar = chars.find(c => c.properties.writeWithoutResponse || c.properties.write);
     const notifyChar = chars.find(c => c.properties.notify);
