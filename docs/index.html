@@ -49,6 +49,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 
   <div class="card">
     <div class="row"><button id="connect" class="primary">Bağlan</button></div>
+    <div class="row" style="margin-top:8px"><button id="connectAll">Tüm cihazları göster</button></div>
     <p id="status">Bağlı değil.</p>
   </div>
 
@@ -121,7 +122,7 @@ function onData(e) {
   }
 }
 
-async function connect() {
+async function connect(showAll) {
   if (!navigator.bluetooth) {
     $('status').textContent = 'Bu tarayıcı Bluetooth desteklemiyor. iPhone/iPad’de Bluefy uygulamasıyla, bilgisayarda Chrome ya da Edge ile aç.';
     return;
@@ -134,11 +135,11 @@ async function connect() {
     if (navigator.bluetooth.getAvailability && !(await navigator.bluetooth.getAvailability()))
       throw new Error('Bluetooth kapalı ya da Bluefy’nin Bluetooth izni yok (Ayarlar → Bluefy → Bluetooth).');
     say('Robot aranıyor');
-    // Bluefy failed with error "2" on acceptAllDevices; search by module name / serial service instead.
-    device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: 'Makeblock' }, { services: [SERVICES[0]] }, { services: [SERVICES[1]] }],
-      optionalServices: SERVICES,
-    });
+    // Default: search by module name / serial service. "Show all" lists every nearby device, to find a module with another name.
+    device = await navigator.bluetooth.requestDevice(showAll
+      ? { acceptAllDevices: true, optionalServices: SERVICES }
+      : { filters: [{ namePrefix: 'Makeblock' }, { services: [SERVICES[0]] }, { services: [SERVICES[1]] }],
+          optionalServices: SERVICES });
     device.addEventListener('gattserverdisconnected', onDisconnect);
     say('Bağlanılıyor: ' + (device.name || 'adsız cihaz'));
     const server = await device.gatt.connect();
@@ -175,7 +176,8 @@ function onDisconnect() {
   $('connect').textContent = 'Bağlan';
 }
 
-$('connect').onclick = () => device?.gatt?.connected ? device.gatt.disconnect() : connect();
+$('connect').onclick = () => device?.gatt?.connected ? device.gatt.disconnect() : connect(false);
+$('connectAll').onclick = () => connect(true);
 $('start').onclick = () => send('S');
 $('stop').onclick = () => send('X');
 
