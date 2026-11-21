@@ -95,9 +95,9 @@ async function pump() {
   busy = true;
   try {
     const data = new TextEncoder().encode(line + '\n');
-    if (writeChar.properties.writeWithoutResponse) await writeChar.writeValueWithoutResponse(data);
+    if (writeChar.properties.writeWithoutResponse && writeChar.writeValueWithoutResponse) await writeChar.writeValueWithoutResponse(data);
     else await writeChar.writeValue(data);
-  } catch (e) { $('status').textContent = 'Gönderme hatası: ' + e.message; }
+  } catch (e) { $('status').textContent = 'Gönderme hatası: ' + ((e && (e.message || e.name)) || String(e)); }
   busy = false;
   pump();
 }
@@ -126,18 +126,29 @@ async function connect() {
     $('status').textContent = 'Bu tarayıcı Bluetooth desteklemiyor. iPhone/iPad’de Bluefy uygulamasıyla, bilgisayarda Chrome ya da Edge ile aç.';
     return;
   }
+  // Each step is named so an error from the browser (Bluefy sometimes gives no message) says where it failed.
+  let step = 'cihaz seçme';
+  const say = s => { step = s; $('status').textContent = s + '…'; };
   try {
-    $('status').textContent = 'Robot aranıyor…';
+    say('Robot aranıyor');
     device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
     device.addEventListener('gattserverdisconnected', onDisconnect);
+    say('Bağlanılıyor: ' + (device.name || 'adsız cihaz'));
     const server = await device.gatt.connect();
-    let chars = [];
+    say('Servisler okunuyor');
+    let chars = [], found = [];
     for (const s of SERVICES) {
-      try { chars = chars.concat(await (await server.getPrimaryService(s)).getCharacteristics()); } catch {}
+      try {
+        const svc = await server.getPrimaryService(s);
+        const cs = await svc.getCharacteristics();
+        chars = chars.concat(cs);
+        found.push(svc.uuid.slice(4, 8) + '[' + cs.map(c => c.uuid.slice(4, 8)).join(' ') + ']');
+      } catch (e) { found.push(s.toString(16) + ':yok'); }
     }
     writeChar = chars.find(c => c.properties.writeWithoutResponse || c.properties.write);
     const notifyChar = chars.find(c => c.properties.notify);
-    if (!writeChar || !notifyChar) throw new Error('Bu cihazda robotun seri servisi bulunamadı. Listeden Makeblock modülünü seç.');
+    if (!writeChar || !notifyChar) throw new Error('Robotun seri servisi bulunamadı (' + found.join(', ') + '). Listeden Makeblock modülünü seç.');
+    say('Bildirimler açılıyor');
     notifyChar.addEventListener('characteristicvaluechanged', onData);
     await notifyChar.startNotifications();
     settingsLoaded = false;
@@ -145,7 +156,8 @@ async function connect() {
     $('controls').classList.remove('disabled');
     $('connect').textContent = 'Bağlantıyı kes';
   } catch (e) {
-    $('status').textContent = e.name === 'NotFoundError' ? 'Cihaz seçilmedi.' : 'Bağlanamadı: ' + e.message;
+    const why = (e && (e.message || e.name)) || String(e);
+    $('status').textContent = e && e.name === 'NotFoundError' ? 'Cihaz seçilmedi.' : 'Bağlanamadı (' + step + '): ' + why;
   }
 }
 
